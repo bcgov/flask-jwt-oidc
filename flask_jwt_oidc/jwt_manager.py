@@ -34,23 +34,24 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
 
     ALGORITHMS = 'RS256'
 
-    def __init__(self, app=None):
+    def __init__(self, app=None, well_known_config=None, well_known_obj_cache=None, algorithms='RS256', jwks_uri=None, issuer=None, audience=None, client_secret=None, cache=None, caching_enabled=False, jwt_oidc_test_mode=False, jwt_oidc_test_keys=None, jwt_role_callback=None):
         """Initialize the JWTManager instance."""
-        # These are all set in the init_app function, but are listed here for easy reference
+        
         self.app = app
-        self.well_known_config = None
-        self.well_known_obj_cache = None
-        self.algorithms = JwtManager.ALGORITHMS
-        self.jwks_uri = None
-        self.issuer = None
-        self.audience = None
-        self.client_secret = None
-        self.cache = None
-        self.caching_enabled = False
+        self.well_known_config = well_known_config
+        self.well_known_obj_cache = well_known_obj_cache
+        self.algorithms = algorithms
+        self.jwks_uri = jwks_uri
+        self.issuer = issuer
+        self.audience = audience
+        self.client_secret = client_secret
+        self.cache = cache
+        self.caching_enabled = caching_enabled
 
-        self.jwt_oidc_test_mode = False
-        self.jwt_oidc_test_keys = None
+        self.jwt_oidc_test_mode = jwt_oidc_test_mode
+        self.jwt_oidc_test_keys = jwt_oidc_test_keys
 
+        self.jwt_role_callback = jwt_role_callback
         if app is not None:
             self.init_app(app)
 
@@ -70,65 +71,26 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
         CLIENT_SECRET: the shared secret / key assigned to the client (audience)
         """
         self.app = app
-        self.jwt_oidc_test_mode = app.config.get('JWT_OIDC_TEST_MODE', None)
-        #
-        # CHECK IF WE"RE RUNNING IN TEST_MODE!!
-        #
-        if self.jwt_oidc_test_mode:
-            app.logger.debug(
-                'JWT MANAGER running in test mode, using locally defined certs & tokens')
+        
 
-            self.issuer = app.config.get(
-                'JWT_OIDC_TEST_ISSUER', 'localhost.localdomain')
-            self.jwt_oidc_test_keys = app.config.get(
-                'JWT_OIDC_TEST_KEYS', None)
-            self.audience = app.config.get('JWT_OIDC_TEST_AUDIENCE', None)
-            self.client_secret = app.config.get(
-                'JWT_OIDC_TEST_CLIENT_SECRET', None)
-            self.jwt_oidc_test_private_key_pem = app.config.get(
-                'JWT_OIDC_TEST_PRIVATE_KEY_PEM', None)
+        self.algorithms = self.algorithms.replace(' ', '').split(',')
 
-            if self.jwt_oidc_test_keys:
-                app.logger.debug('local key being used: {}'.format(
-                    self.jwt_oidc_test_keys))
-            else:
-                app.logger.error(
-                    'Attempting to run JWT Manager with no local key assigned')
-                raise Exception(
-                    'Attempting to run JWT Manager with no local key assigned')
+        # If the WELL_KNOWN_CONFIG is set, then go fetch the JWKS & ISSUER
+        if self.well_known_config:
+            # try to get the jwks & issuer from the well known config
+            # jurl = urlopen(url=self.well_known_config, context=ssl.SSLContext()) # for gangster testing
+            jurl = urlopen(url=self.well_known_config)
+            self.well_known_obj_cache = json.loads(
+                jurl.read().decode('utf-8'))
 
+            self.jwks_uri = self.well_known_obj_cache['jwks_uri']
+            self.issuer = self.well_known_obj_cache['issuer']
         else:
+            # TODO: Raise exception
+            print('jwks_uri and issuer must be set when creating the jwt manager')
 
-            self.algorithms = app.config.get(
-                'JWT_OIDC_ALGORITHMS', JwtManager.ALGORITHMS).replace(' ', '')\
-                .split(',')
-
-            # If the WELL_KNOWN_CONFIG is set, then go fetch the JWKS & ISSUER
-            self.well_known_config = app.config.get(
-                'JWT_OIDC_WELL_KNOWN_CONFIG', None)
-            if self.well_known_config:
-                # try to get the jwks & issuer from the well known config
-                # jurl = urlopen(url=self.well_known_config, context=ssl.SSLContext()) # for gangster testing
-                jurl = urlopen(url=self.well_known_config)
-                self.well_known_obj_cache = json.loads(
-                    jurl.read().decode('utf-8'))
-
-                self.jwks_uri = self.well_known_obj_cache['jwks_uri']
-                self.issuer = self.well_known_obj_cache['issuer']
-            else:
-
-                self.jwks_uri = app.config.get('JWT_OIDC_JWKS_URI', None)
-                self.issuer = app.config.get('JWT_OIDC_ISSUER', None)
-
-            # Setup JWKS caching
-            self.caching_enabled = app.config.get(
-                'JWT_OIDC_CACHING_ENABLED', False)
-            if self.caching_enabled:
-                self.cache = SimpleCache(default_timeout=app.config.get(
-                    'JWT_OIDC_JWKS_CACHE_TIMEOUT', 300))
-
-            self.audience = app.config.get('JWT_OIDC_AUDIENCE', None)
-            self.client_secret = app.config.get('JWT_OIDC_CLIENT_SECRET', None)
+        if self.caching_enabled:
+            self.cache = SimpleCache(300)
 
         app.logger.debug('JWKS_URI: {}'.format(self.jwks_uri))
         app.logger.debug('ISSUER: {}'.format(self.issuer))
@@ -139,8 +101,7 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
         app.logger.debug('JWT_OIDC_TEST_KEYS: {}'.format(self.jwt_oidc_test_keys))
 
         # set the auth error handler
-        auth_err_handler = app.config.get(
-            'JWT_OIDC_AUTH_ERROR_HANDLER', JwtManager.handle_auth_error)
+        auth_err_handler = JwtManager.handle_auth_error
         app.register_error_handler(AuthError, auth_err_handler)
 
         app.teardown_appcontext(self.teardown)
@@ -200,11 +161,10 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
 
         Args:
             roles [str,]: Comma separated list of valid roles
-            JWT_ROLE_CALLBACK (fn): The callback added to the Flask configuration
         """
         token = self.get_token_auth_header()
         unverified_claims = jwt.get_unverified_claims(token)
-        roles_in_token = current_app.config['JWT_ROLE_CALLBACK'](
+        roles_in_token = self.jwt_role_callback(
             unverified_claims)
         if any(elem in roles_in_token for elem in roles):
             return True
@@ -215,7 +175,6 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
 
         Args:
             roles [str,]: Comma separated list of valid roles
-            JWT_ROLE_CALLBACK (fn): The callback added to the Flask configuration
         """
         def decorated(f):
             @wraps(f)
@@ -234,11 +193,10 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
 
         Args:
             required_roles [str,]: Comma separated list of required roles
-            JWT_ROLE_CALLBACK (fn): The callback added to the Flask configuration
         """
         token = self.get_token_auth_header()
         unverified_claims = jwt.get_unverified_claims(token)
-        roles_in_token = current_app.config['JWT_ROLE_CALLBACK'](
+        roles_in_token = self.jwt_role_callback(
             unverified_claims)
         if all(elem in roles_in_token for elem in required_roles):
             return True
@@ -249,7 +207,6 @@ class JwtManager:  # pylint: disable=too-many-instance-attributes
 
         Args:
             required_roles [str,]: Comma separated list of required roles
-            JWT_ROLE_CALLBACK (fn): The callback added to the Flask configuration
         """
         def decorated(f):
             @wraps(f)
